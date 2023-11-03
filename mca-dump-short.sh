@@ -154,6 +154,9 @@ match($0, "^interface [A-z0-9]+$") {
 	countedPortId=countedPortId+1
 	portId=countedPortId
 }
+match($0, "^switch\.port\.[1-5]\.name=") {
+	portId=substr($1,13)
+}
 /description / {
 		desc=""
 		defaultDesc="Port " portId
@@ -173,7 +176,12 @@ match($0, "^interface [A-z0-9]+$") {
 		else
 			desc="(" desc ")"
 		printf ".port_table[" portId-1 "] += { \"port_desc\": \"" desc "\" }"
-	}'
+	}
+	
+/name=/ {
+	printf ".port_table[" portId-1 "] += { \"port_desc\": \"" substr($i, 20) "\" }"
+}'
+
 
 
 
@@ -251,15 +259,8 @@ function retrievePortNamesInto() {
 	  	
 	  	"USW-Flex\r\n" {
 		  log_file -noappend ${logFile};
-		  send_log "interface 0/1\r\n"
-		  send_log "description 'Port 1'\r\n"
-		  send_log "interface 0/2\r\n"
-		  send_log "description 'Port 2;\r\n"
-		  send_log "interface 0/3\r\n"
-		  send_log "description 'Port 3'\r\n"
-		  send_log "interface 0/4\r\n"
-		  send_log "description 'Port 4'\r\n"
-		  log_file;
+		  send -- "/var/running.cfg\r"
+		  log_file -noappend ${logFile};
 	  	 }
 
 		-re ".*\r\n" { 
