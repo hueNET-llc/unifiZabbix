@@ -156,10 +156,10 @@ match($0, "^interface [A-z0-9]+$") {
 		defaultDesc="Port " portId
 		for (i=2; i<=NF; i++) {
 			f=$i
-			if (i==2) f=substr(f,2)
-			if (i==NF) 
+			if (i==2 && substr(f, 1, 1) == "'\''") f=substr(f,2)
+			if (i==NF && substr(f, length(f)) == "'\''") 
 				f=substr(f,1,length(f)-1)
-			else
+			else if (i != NF)
 				f=f " "
 			desc=desc f
 		}
