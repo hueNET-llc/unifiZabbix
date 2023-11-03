@@ -147,6 +147,9 @@ BEGIN { IFS=" \n"; first=1; countedPortId=0 }
 match($0, "^interface 0/[0-9]+$") { 
 	portId=substr($2,3)
 }
+match($0, "^interface [A-z]+ 1/[0-9]+$") { 
+	portId=substr($3,3)
+}
 match($0, "^interface [A-z0-9]+$") { 
 	countedPortId=countedPortId+1
 	portId=countedPortId
@@ -226,7 +229,7 @@ function retrievePortNamesInto() {
       expect ".*\r\n"
 	  expect {
 
-	  	-re "(USW-Aggregation|USW-Flex-XG|USW-Enterprise-8-PoE)\r\n" {
+	  	-re "(USW-Aggregation|USW-Flex-XG|USW-Enterprise-8-PoE|USW-Industrial|USC-8)\r\n" {
 		  expect -re ".*#"
 
 		  send -- "cli\r"
