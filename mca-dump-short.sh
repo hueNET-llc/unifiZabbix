@@ -155,7 +155,7 @@ match($0, "^interface [A-z0-9]+$") {
 	portId=countedPortId
 }
 match($0, "^switch\.port\.[1-5]\.name=") {
-	portId=substr($1,13)
+	portId=substr($0,13)
 }
 /description / {
 		desc=""
@@ -178,8 +178,10 @@ match($0, "^switch\.port\.[1-5]\.name=") {
 		printf ".port_table[" portId-1 "] += { \"port_desc\": \"" desc "\" }"
 	}
 	
-/name=/ {
-	printf ".port_table[" portId-1 "] += { \"port_desc\": \"" substr($i, 20) "\" }"
+/^switch\.port\.[1-5]\.name=/ {
+	if (first != 1) printf "| "
+	first=0
+	printf ".port_table[" portId-1 "] += { \"port_desc\": \"(" substr($i, 20) ")\" }"
 }'
 
 
@@ -236,7 +238,6 @@ function retrievePortNamesInto() {
 	  send -- "cat /etc/board.info | grep board.name | cut -d'=' -f2\r"
       expect ".*\r\n"
 	  expect {
-
 	  	-re "(USW-Aggregation|USW-Flex-XG|USW-Enterprise-8-PoE|USW-Industrial|USC-8)\r\n" {
 		  expect -re ".*#"
 
@@ -258,9 +259,10 @@ function retrievePortNamesInto() {
 	  	}	  	
 	  	
 	  	"USW-Flex\r\n" {
+		  send -- "cat /var/running.cfg | grep switch.port.\r"
 		  log_file -noappend ${logFile};
-		  send -- "/var/running.cfg\r"
-		  log_file -noappend ${logFile};
+		  expect -re {.*\r\n.*[0-9]#}
+		  send -- "exit\r"
 	  	 }
 
 		-re ".*\r\n" { 
