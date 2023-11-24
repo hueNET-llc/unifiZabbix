@@ -156,6 +156,9 @@ match($0, "^interface [A-z0-9]+$") {
 }
 match($0, "^switch\.port\.[1-5]\.name=") {
 	portId=substr($0,13)
+	if (first != 1) printf "| "
+	first=0
+	printf ".port_table[" portId-1 "] += { \"port_desc\": \"(" substr($i, 20) ")\" }\n"
 }
 /description / {
 		desc=""
@@ -175,13 +178,7 @@ match($0, "^switch\.port\.[1-5]\.name=") {
 			desc="-"
 		else
 			desc="(" desc ")"
-		printf ".port_table[" portId-1 "] += { \"port_desc\": \"" desc "\" }"
-	}
-	
-/^switch\.port\.[1-5]\.name=/ {
-	if (first != 1) printf "| "
-	first=0
-	printf ".port_table[" portId-1 "] += { \"port_desc\": \"(" substr($i, 20) ")\" }"
+		printf ".port_table[" portId-1 "] += { \"port_desc\": \"" desc "\" }\n"
 }'
 
 
@@ -595,5 +592,4 @@ truncateFileOnceADay "$errFile"
 truncateFileOnceADay "$logFile"
 
 exit $EXIT_CODE
-
 
