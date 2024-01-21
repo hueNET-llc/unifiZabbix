@@ -225,7 +225,7 @@ function retrievePortNamesInto() {
 
 	#shellcheck disable=SC2086
 	/usr/bin/expect ${options} > "${outStream}" <<EOD
-      set timeout 30
+      set timeout 120
 
       spawn ${SSHPASS_OPTIONS} ssh  ${SSH_PORT} ${HE_RSA_SSH_KEY_OPTIONS} -o LogLevel=Error -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} ${USER}@${TARGET_DEVICE}
       
