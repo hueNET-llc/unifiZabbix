@@ -7,12 +7,15 @@ declare HE_RSA_SSH_KEY_OPTIONS='-o PubkeyAcceptedKeyTypes=+ssh-rsa -o HostKeyAlg
 declare -A VALIDATOR_BY_TYPE
 VALIDATOR_BY_TYPE["AP"]=".vap_table? != null and .radio_table != null"
 VALIDATOR_BY_TYPE["UDMP"]=".network_table? != null"
+VALIDATOR_BY_TYPE["USG-LITE"]=".network_table? != null"
 VALIDATOR_BY_TYPE["USG"]="( .network_table? != null ) and ( .network_table | map(select(.mac!=null)) | length>0 )"
 declare -A OPTIONAL_VALIDATOR_BY_TYPE
 declare -A OPTION_MESSAGE
 #OPTIONAL_VALIDATOR_BY_TYPE["USG"]=" ( ( .[\"system-stats\"].temps | length ) == 4 ) "
 #OPTION_MESSAGE["USG"]="missingTemperatures"
 
+declare RETRIABLE_ERROR=250
+declare SSH_CONNECT_TIMEOUT=5
 
 #---------------------------------------------------------------------------------------
 # Utilities
@@ -44,19 +47,19 @@ function runWithTimeout () {
 function errorJsonWithReason() {
 	local reason; reason=$(echo "$1" | tr -d "\"'\n\r" )
 	local t; t=$(date +"%T")
-	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpError":"Error" }'
+	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpError":"Error" }' 
 }
 
 function validationErrorJsonWithReason() {
 	local reason; reason=$(echo "$1" | tr -d "\"'\n\r" )
 	local t; t=$(date +"%T")
-	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpValidationError":"Error" }'
+	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpValidationError":"Error" }' 
 }
 
 function timeoutJsonWithReason() {
 	local reason; reason=$(echo "$1" | tr -d "\"'\n\r" )
 	local t; t=$(date +"%T")
-	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpTimeout":"Error" }'
+	echo '{ "at":"'"${t}"'", "r":"'"${reason}"'", "device":"'"${TARGET_DEVICE}"'", "mcaDumpTimeout":"Error" }' 
 }
 
 
@@ -74,16 +77,21 @@ function echoErr() {
 		echo "$(date) $TARGET_DEVICE"
 		echo "  ${error}"
 	} >> "${errFile}"
+	if [[ -f "/./.dockerenv" ]]; then   # also echo the error to docker logs if running inside a container
+	{
+		echo "  ${error}" 
+	} >> /proc/1/fd/1
+	fi
 }
 
 function issueSSHCommand() {
 	local command=$*
  	if [[ -n "${VERBOSE:-}" ]]; then
  		#shellcheck disable=SC2086
- 		echo ${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" "$command"
+ 		echo ${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o LogLevel=Error -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" "$command"
  	fi
  	#shellcheck disable=SC2086
-	${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" "$command"
+	${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o LogLevel=Error -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" "$command"
 }
 
 declare TRUNCATE_SIZE=1000000 # 1M
@@ -216,7 +224,7 @@ function retrievePortNamesInto() {
 	#sleep $(( TIMEOUT + 1 )) # This ensures we leave the switch alone while mca-dump proper is processed;  the next invocation will find the result
  	if [[ -n "${VERBOSE:-}" ]]; then
  		#shellcheck disable=SC2086
- 		echo ${SSHPASS_OPTIONS} spawn ssh  ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} -o LogLevel=Error -o StrictHostKeyChecking=accept-new "${PRIVKEY_OPTION}" "${USER}@${TARGET_DEVICE}"  >&2
+ 		echo ${SSHPASS_OPTIONS} spawn ssh  ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} -o LogLevel=Error -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o LogLevel=Error -o StrictHostKeyChecking=accept-new "${PRIVKEY_OPTION}" "${USER}@${TARGET_DEVICE}"  >&2
  	fi
  	if [[ -n "${VERBOSE_PORT_DISCOVERY:-}" ]]; then
  		options="-d"
@@ -227,7 +235,7 @@ function retrievePortNamesInto() {
 	/usr/bin/expect ${options} > "${outStream}" <<EOD
       set timeout 120
 
-      spawn ${SSHPASS_OPTIONS} ssh  ${SSH_PORT} ${HE_RSA_SSH_KEY_OPTIONS} -o LogLevel=Error -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} ${USER}@${TARGET_DEVICE}
+      spawn ${SSHPASS_OPTIONS} ssh  ${SSH_PORT} ${HE_RSA_SSH_KEY_OPTIONS}  -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o LogLevel=Error -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} ${USER}@${TARGET_DEVICE}
       
 	  send -- "\r"
 
@@ -296,7 +304,7 @@ function retrievePortNamesInto() {
 		}
 EOD
 	local exitCode=$?
-	if (( exitCode != 0 )); then
+	if (( exitCode )); then
 		{ 	echo "$(date) $TARGET_DEVICE"; 
 			echo "  retrievePortNamesInto failed with code $exitCode";
 			echo "Full command was mca-dump-short.sh $FULL_ARGS" 
@@ -340,15 +348,37 @@ function insertPortNamesIntoJson() {
 #---------------------------------------------------------------------------------------------------------------------
 # mca-dump invocation
 
+
+function invokeUpToNTimesWithDelay() {
+	local count=$1
+	local delay=$2
+	shift 2
+	local returnCode=0
+	local invocations
+	for (( invocations=0; invocations < count; invocations++ )); do
+		"$@"
+		returnCode=$?
+		if (( returnCode==0 || returnCode != RETRIABLE_ERROR )); then
+			invocations=$count
+		else
+			echoErr " Warning: Retrying $1 request"
+			sleep "$delay"
+		fi
+	done
+	return $returnCode
+}
+
 function invokeMcaDump() {
 	local deviceType=$1
 	local jqProgram=$2
-	local -n exitCode=$3
-	local -n output=$4
-	local -n jsonOutput=$5
+	local -n exitCode=$3; exitCode=0
+	local -n output=$4; output=
+	local -n jsonOutput=$5; jsonOutput=
 
-	INDENT_OPTION="--indent 0"
+	local indentOption="--indent 0"
 
+
+	local delay=1 # the CPU is very wimpy on the USG-lite, ssh into it affects the usage.  Sleeping 2s gets a better CPU read
 	case "${deviceType:-}" in 
 
 		AP) 							JQ_OPTIONS='del (.port_table) | del(.radio_table[]?.scan_table) | ( .vap_table[]|= ( .clientCount = ( .sta_table|length ) ) ) | del (.vap_table[]?.sta_table)' ;;
@@ -366,32 +396,34 @@ function invokeMcaDump() {
 												fan_level_key_name: \"fan_level\"
 												} ]" ;;
 		UDMP| USG)						JQ_OPTIONS='del (.dpi_stats) | del(.fingerprints) | del( .network_table[]? |  select ( .address == null ))' ;;
+		USG-LITE)						JQ_OPTIONS='del (.dpi_stats) | del(.fingerprints) | del( .network_table[]? |  select ( .address == null ))'
+										delay=4 ;;  # the CPU is very wimpy on the USG-lite, ssh into it affects the usage.  Sleeping 2s gets a better CPU read
 		CK)								JQ_OPTIONS='del (.dpi_stats)' ;;
 		*)								echo "Unknown device Type: '${DEVICE_TYPE:-}'"; usage ;;
 	esac
-
-	local mcaErrorFile=/tmp/mca-$RANDOM.err
-
-	output=$(runWithTimeout "${TIMEOUT}" issueSSHCommand mca-dump  2> "${mcaErrorFile}")
+	
+	#shellcheck disable=SC2086
+	output=$(timeout --signal=HUP --kill-after=5 "${TIMEOUT}" \
+		${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o LogLevel=Error -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" ${delay:+sleep ${delay}\;} mca-dump 2>&1	)
 	exitCode=$?
 	#shellcheck disable=SC2034
 	jsonOutput="${output}"
 
-	if (( exitCode >= 127 && exitCode != 255 )); then
+	if (( exitCode == 124  )); then
 		output=$(timeoutJsonWithReason "timeout ($exitCode)")
-	elif (( exitCode != 0 )) || [[ -z "${output}" ]]; then
-		output=$(errorJsonWithReason "$(echo "Remote pb: "; cat "${mcaErrorFile}"; echo "${output}" )")
+	elif (( exitCode )) || [[ -z "${output}" ]]; then
+		output=$(errorJsonWithReason "$(echo "Remote pb: "; echo "${output}" )")
 		exitCode=1
 	else
 		if [[ -n "${JQ_VALIDATOR:-}" ]]; then
 			local validation; validation=$(echo "${output}" | jq "${JQ_VALIDATOR}")
 			exitCode=$?
-			if [[ -z "${validation}" ]] || [[ "${validation}" == "false" ]] || (( exitCode != 0 )); then
+			if [[ -z "${validation}"  || "${validation}" == "false" ]] || (( exitCode )); then
 				output=$(validationErrorJsonWithReason "validationError: ${JQ_VALIDATOR}")
-				exitCode=1
+				exitCode=$RETRIABLE_ERROR
 			fi
 		fi
-		if [[ -n "${JQ_OPTION_VALIDATOR:-}" ]]; then
+		if (( ! exitCode )) && [[ -n "${JQ_OPTION_VALIDATOR:-}" ]]; then
 			local optionValidation; optionValidation=$(echo "${output}" | jq "${JQ_OPTION_VALIDATOR}")
 			exitCode=$?
 			if [[ -z "${optionValidation}" ]] || [[ "${optionValidation}" == "false" ]] || (( exitCode != 0 )); then				
@@ -399,22 +431,22 @@ function invokeMcaDump() {
 				output=$(insertWarningIntoJsonOutput "$message" "$output")
 			fi			
 		fi		
-		if (( exitCode == 0 )); then
+		if (( ! exitCode )); then
 			errorFile="/tmp/jq$RANDOM$RANDOM.err"
 			jqInput=${output}
 			output=
 			#shellcheck disable=SC2086
-			output=$(echo  "${jqInput}" | jq ${INDENT_OPTION} "${JQ_OPTIONS}" 2> "${errorFile}")
+			output=$(echo  "${jqInput}" | jq ${indentOption} "${JQ_OPTIONS}" 2> "${errorFile}")
 			exitCode=$?
 			if (( exitCode != 0 )) || [[ -z "${output}" ]]; then
-				output=$(errorJsonWithReason "jq ${INDENT_OPTION} ${JQ_OPTIONS} returned status $exitCode; $(cat $errorFile);  JQ input was ${jqInput}")
+				output=$(errorJsonWithReason "jq ${indentOption} ${JQ_OPTIONS} returned status $exitCode; $(cat "$errorFile")")
 				exitCode=1
 			fi
 			rm -f "${errorFile}" 2>/dev/null
 		fi
 	fi
 
-	if (( exitCode == 0 )) && [[ "${DEVICE_TYPE:-}" == 'SWITCH_DISCOVERY' ]]; then
+	if (( ! exitCode )) && [[ "${DEVICE_TYPE:-}" == 'SWITCH_DISCOVERY' ]]; then
 		# do not wait anymore for retrievePortNamesInto
 		# this will ensure we don't time out, but sometimes we will use an older file
 		# wait 
@@ -424,12 +456,12 @@ function invokeMcaDump() {
 		insertPortNamesIntoJson output "${jqProgram}" "${jqInput}"  2> "${errorFile}"
 		local code=$?
 		if (( code != 0 )) || [[ -z "${output}" ]]; then
-			output=$(errorJsonWithReason "insertPortNamesIntoJson failed with error code $code; $(cat $errorFile)")
+			output=$(errorJsonWithReason "insertPortNamesIntoJson failed with error code $code; $(cat "$errorFile")")
 			exitCode=1
 		fi
 		rm "${errorFile}" 2>/dev/null
 	fi
-	rm -f  "${mcaErrorFile}" 2>/dev/null
+	return "$exitCode"
 }
 
 
@@ -445,7 +477,7 @@ function usage() {
 	fi
 	
 	cat <<- EOF
-	Usage ${0}  -i privateKeyPath -p <passwordFilePath> -u user -v -d targetDevice [-t AP|SWITCH|SWITCH_FEATURE_DISCOVERY|SWITCH_DISCOVERY|UDMP|UDMP_FAN_DISCOVERY|UDMP_TEMP_DISCOVERY|USG|CK|WIFI_SITE]
+	Usage ${0}  -i privateKeyPath -p <passwordFilePath> -u user -v -d targetDevice [-t AP|SWITCH|SWITCH_FEATURE_DISCOVERY|SWITCH_DISCOVERY|UDMP|UDMP_FAN_DISCOVERY|UDMP_TEMP_DISCOVERY|USG|USG-LITE|CK|WIFI_SITE]
 	  -i specify private public key pair path
 	  -p specify password file path to be passed to sshpass -f. Note if both -i and -p are provided, the password file will be used
 	  -u SSH user name for Unifi device
@@ -454,12 +486,21 @@ function usage() {
 	  -t Unifi device type
 	  -v verbose and non compressed output
 	  -w verbose output for port discovery
+	  -x extreme debugging
 	  -o <timeout> max timeout (3s minimum)
 	  -O echoes debug and timing info to /tmp/mcaDumpShort.log; errors are always echoed to /tmp/mcaDumpShort.err
 	  -V <jqExpression> Provide a JQ expression that must return a non empty output to validate the results. A json error is returned otherwise
 	  -b run SSH in batch mode (do not ask for passwords)
 	EOF
 	exit 1
+}
+
+function checkOptForMissingMacro() {
+	local v=$1
+	local t=$2
+	if [[ "$v" == "{\$$t}" ]]; then
+		echo "Please set the {\$$t} macro in zabbix > Administration"
+	fi
 }
 
 #------------------------------------------------------------------------------------------------
@@ -479,23 +520,26 @@ declare VERBOSE=
 declare FULL_ARGS="$*"
 declare BATCH_MODE=
 
-while getopts 'i:u:t:hd:vp:wm:o:OV:U:P:eb' OPT
+while getopts 'i:u:t:hd:vp:wm:o:OV:U:P:ebx' OPT
 do
   case $OPT in
-    i) PRIVKEY_OPTION="-i "${OPTARG} ;;
-    u) USER=${OPTARG} ;;
-    t) DEVICE_TYPE=${OPTARG} ;;
-    d) TARGET_DEVICE=${OPTARG} ;;
-    P) TARGET_DEVICE_PORT=${OPTARG} ;;
-    v) export VERBOSE=true ;;
-    p) PASSWORD_FILE_PATH=${OPTARG} ;;
-    w) VERBOSE_PORT_DISCOVERY=true ;;
-    m) logFile=${OPTARG} ;;
-    o) TIMEOUT=$(( OPTARG-1 )) ;;
-    O) ECHO_OUTPUT=true ;;
-    V) JQ_VALIDATOR=${OPTARG} ;;
-    b) BATCH_MODE="-o BatchMode=yes" ;;
-    e) echo -n "$(errorJsonWithReason "simulated error")"; exit 1 ;;
+    i) 	checkOptForMissingMacro "${OPTARG}" "UNIFI_SSH_PRIV_KEY_PATH}"
+    	PRIVKEY_OPTION="-i "${OPTARG} ;;
+    u) 	checkOptForMissingMacro "${OPTARG}" "USER}"
+    	USER=${OPTARG} ;;
+    t) 	DEVICE_TYPE=${OPTARG} ;;
+    d) 	TARGET_DEVICE=${OPTARG} ;;
+    P) 	TARGET_DEVICE_PORT=${OPTARG} ;;
+    v) 	export VERBOSE=true ;;
+    p) 	PASSWORD_FILE_PATH=${OPTARG} ;;
+    w) 	VERBOSE_PORT_DISCOVERY=true ;;
+    m) 	logFile=${OPTARG} ;;
+    o) 	TIMEOUT=$(( OPTARG-1 )) ;;
+    O) 	ECHO_OUTPUT=true ;;
+    V) 	JQ_VALIDATOR=${OPTARG} ;;
+    x)	set -x ;;
+    b) 	BATCH_MODE="-o BatchMode=yes" ;;
+    e) 	echo -n "$(errorJsonWithReason "simulated error")"; exit 1 ;;
     U)  if [[ -n "${OPTARG}" ]] &&  [[ "${OPTARG}" != "{\$UNIFI_VERBOSE_SSH}" ]]; then
     		export VERBOSE_SSH="${OPTARG}"
     	fi ;;
@@ -506,6 +550,7 @@ done
 declare EXIT_CODE=0
 declare OUTPUT=
 declare JSON_OUTPUT=
+
 
 
 if [[ -n "${ECHO_OUTPUT:-}" ]]; then
@@ -537,10 +582,12 @@ if [[ -n "${TARGET_DEVICE_PORT}" ]]; then
 	fi
 fi
 
+
 if [[ -z "${USER:-}" ]]; then
 	echo "Please specify a username with -u" >&2
 	usage
 fi
+
 
 if [[ -z "${JQ_VALIDATOR:-}" ]]; then
 	JQ_VALIDATOR=${VALIDATOR_BY_TYPE["${DEVICE_TYPE}"]:-}
@@ -567,7 +614,7 @@ fi
 if (( EXIT_CODE == 0 )); then
 	case "${DEVICE_TYPE}" in
 		UDMP_FAN_DISCOVERY)	fanDiscovery EXIT_CODE OUTPUT JSON_OUTPUT ;;
-		*)					invokeMcaDump "$DEVICE_TYPE" "$JQ_PROGRAM" EXIT_CODE OUTPUT JSON_OUTPUT ;;
+		*)					invokeUpToNTimesWithDelay 2 0 invokeMcaDump "$DEVICE_TYPE" "$JQ_PROGRAM" EXIT_CODE OUTPUT JSON_OUTPUT ;;
 	esac
 fi
 
@@ -582,8 +629,9 @@ if [[ -n "${ECHO_OUTPUT:-}" ]]; then
 	fi
 fi
 
-if (( EXIT_CODE != 0 )); then
-	echoErr " ${OUTPUT}\n  ${JSON_OUTPUT}" 
+if (( EXIT_CODE )); then
+	echoErr "${OUTPUT}" 
+	echoErr "${JSON_OUTPUT}" 
 fi
 
 echo "${OUTPUT}"
