@@ -403,7 +403,7 @@ function invokeMcaDump() {
 	esac
 	
 	#shellcheck disable=SC2086
-	output=$(timeout --signal=HUP --kill-after=5 "${TIMEOUT}" \
+	output=$(timeout "${TIMEOUT}" \
 		${SSHPASS_OPTIONS} ssh ${SSH_PORT} ${VERBOSE_SSH} ${HE_RSA_SSH_KEY_OPTIONS} ${BATCH_MODE} -o LogLevel=Error -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o StrictHostKeyChecking=accept-new ${PRIVKEY_OPTION} "${USER}@${TARGET_DEVICE}" ${delay:+sleep ${delay}\;} mca-dump 2>&1	)
 	exitCode=$?
 	#shellcheck disable=SC2034
